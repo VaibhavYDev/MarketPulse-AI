@@ -2,7 +2,7 @@
 
 A browser-based trading intelligence bot for Indian markets. Open it, click Generate — it reads out a full structured briefing for all 8 assets. No install, no backend, runs entirely in the browser.
 
-🌐 **Live:** [vaibhavy2011.github.io/MarketPulse-AI](https://vaibhavy2011.github.io/MarketPulse-AI/)
+🌐 **Live:** [VaibhavYDev.github.io/MarketPulse-AI](https://VaibhavYDev.github.io/MarketPulse-AI/)
 
 ![MarketPulse](https://img.shields.io/badge/MarketPulse-Intelligence%20Engine-00d4ff?style=flat-square)
 ![Demo](https://img.shields.io/badge/demo-live-10b981?style=flat-square&logo=github)
@@ -137,6 +137,6 @@ MIT — use it, fork it, modify it.
 ---
 
 **Vaibhav Yadav** · Greater Noida, India
-GitHub: [@Vaibhavy2011](https://github.com/Vaibhavy2011)
+GitHub: [@VaibhavYDev](https://github.com/VaibhavYDev)
 
 *"One unit of risk. Three units of reward. Every time."*
