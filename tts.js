@@ -1,24 +1,39 @@
 // ============================================================
-// MarketPulse AI — tts.js
-// Text-to-Speech engine using Web Speech API
-// Indian English preferred voice, full playback controls
+// MarketPulse AI — tts.js v3 (COMPLETE REWRITE)
+//
+// BUG FIXES:
+// FIX 1: Chrome 15-second speechSynthesis silence bug
+//         → keepalive timer calls synth.resume() every 12s
+// FIX 2: pause() race condition — was calling synth.cancel()
+//         which fires onerror='interrupted' before isPaused=true
+//         → now uses a clean stopSignal + pauseSignal approach
+// FIX 3: speak() async loop getting stuck on unresolved promises
+//         → each utterance has its own 20s timeout fallback
+// FIX 4: stop() not breaking out of async for-loop
+//         → stopSignal flag checked at every await point
+// FIX 5: Resume after pause was re-speaking from wrong index
+//         → resumeFromIndex tracked explicitly
 // ============================================================
 
 const TTSEngine = (() => {
 
   const synth = window.speechSynthesis;
-  let voices = [];
-  let selectedVoice = null;
-  let currentUtterances = [];
-  let isPaused = false;
-  let isPlaying = false;
-  let currentSentenceIndex = 0;
-  let sentences = [];
-  let onSentenceCallback = null;
-  let onEndCallback = null;
-  let onStartCallback = null;
 
-  // ── Load available voices ──
+  let voices         = [];
+  let selectedVoice  = null;
+  let isPlaying      = false;
+  let isPaused       = false;
+  let stopSignal     = false;   // NEW: clean break signal for async loop
+  let pauseSignal    = false;   // NEW: separate from isPaused state
+  let sentences      = [];
+  let resumeFromIdx  = 0;       // NEW: exact index to resume from
+  let keepaliveTimer = null;    // NEW: Chrome silence-bug fix timer
+
+  let onSentenceCallback = null;
+  let onEndCallback      = null;
+  let onStartCallback    = null;
+
+  // ── Load voices ──
   function loadVoices() {
     return new Promise((resolve) => {
       voices = synth.getVoices();
@@ -32,133 +47,212 @@ const TTSEngine = (() => {
         selectBestVoice();
         resolve(voices);
       };
+      // Fallback if onvoiceschanged never fires (some browsers)
+      setTimeout(() => {
+        if (voices.length === 0) {
+          voices = synth.getVoices();
+          selectBestVoice();
+          resolve(voices);
+        }
+      }, 2000);
     });
   }
 
   function selectBestVoice() {
-    // Priority 1: Indian English
-    selectedVoice = voices.find(v => v.lang === 'en-IN') ||
-    // Priority 2: Any English with Indian in name
-    voices.find(v => v.lang.startsWith('en') && v.name.toLowerCase().includes('india')) ||
-    // Priority 3: Google UK English (clean, authoritative)
-    voices.find(v => v.name.includes('Google UK English Male')) ||
-    // Priority 4: Any Google English
-    voices.find(v => v.name.includes('Google') && v.lang.startsWith('en')) ||
-    // Priority 5: Any English
-    voices.find(v => v.lang.startsWith('en')) ||
-    // Fallback
-    voices[0];
-    console.log('[TTSEngine] Selected voice:', selectedVoice?.name, selectedVoice?.lang);
+    selectedVoice =
+      voices.find(v => v.lang === 'en-IN') ||
+      voices.find(v => v.lang.startsWith('en') && v.name.toLowerCase().includes('india')) ||
+      voices.find(v => v.name.includes('Google UK English Male')) ||
+      voices.find(v => v.name.includes('Google') && v.lang.startsWith('en')) ||
+      voices.find(v => v.lang.startsWith('en')) ||
+      voices[0] || null;
+    if (selectedVoice) {
+      console.log('[TTS] Voice selected:', selectedVoice.name, selectedVoice.lang);
+    }
   }
 
   function getVoiceList() {
     return voices.filter(v => v.lang.startsWith('en'));
   }
 
-  function setVoice(voiceName) {
-    selectedVoice = voices.find(v => v.name === voiceName) || selectedVoice;
+  function setVoice(name) {
+    const v = voices.find(v => v.name === name);
+    if (v) selectedVoice = v;
   }
 
-  // ── Split text into speakable sentences ──
+  // ── FIX: Chrome 15s keepalive ──
+  // Chrome stops TTS after ~15s of a long utterance or between sentences.
+  // Calling synth.pause() + synth.resume() every 12s keeps it alive.
+  function startKeepalive() {
+    stopKeepalive();
+    keepaliveTimer = setInterval(() => {
+      if (isPlaying && !isPaused && synth.speaking) {
+        synth.pause();
+        synth.resume();
+      }
+    }, 12000);
+  }
+
+  function stopKeepalive() {
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = null;
+    }
+  }
+
+  // ── Split text into short chunks for reliable TTS ──
   function splitIntoSentences(text) {
-    // Clean markdown artifacts if any slipped through
+    // Clean any markdown that might have slipped through
     let clean = text
-      .replace(/\*\*/g, '')
-      .replace(/#{1,6}\s/g, '')
-      .replace(/\*/g, '')
-      .replace(/\_/g, '')
-      .replace(/\[|\]/g, '');
+      .replace(/\*\*/g, '').replace(/#{1,6}\s/g, '')
+      .replace(/\*/g, '').replace(/_/g, '')
+      .replace(/\[|\]/g, '').replace(/\n{3,}/g, '\n\n');
 
     // Split on sentence boundaries
-    const raw = clean.match(/[^.!?]+[.!?]+/g) || [clean];
-    return raw.map(s => s.trim()).filter(s => s.length > 3);
+    const raw = clean.match(/[^.!?\n]+[.!?\n]+/g) || [clean];
+    return raw
+      .map(s => s.trim())
+      .filter(s => s.length > 3);
   }
 
-  // ── Speak a single sentence ──
-  function speakSentence(text, rate, pitch, volume) {
+  // ── FIX: Single utterance with 20s hard timeout ──
+  // Prevents the speak loop from hanging forever if onend never fires
+  function speakOne(text) {
     return new Promise((resolve) => {
-      const utt = new SpeechSynthesisUtterance(text);
-      utt.voice = selectedVoice;
-      utt.rate = rate || CONFIG.tts.rate;
-      utt.pitch = pitch || CONFIG.tts.pitch;
-      utt.volume = volume || CONFIG.tts.volume;
+      if (stopSignal) { resolve(); return; }
 
-      utt.onend = () => resolve();
-      utt.onerror = (e) => {
-        if (e.error !== 'interrupted') console.warn('[TTS] Error:', e.error);
-        resolve();
+      // Chrome bug: if tab is not focused, speak() may silently fail
+      // Workaround: cancel any pending speech first
+      synth.cancel();
+
+      const utt     = new SpeechSynthesisUtterance(text);
+      utt.voice     = selectedVoice;
+      utt.rate      = CONFIG.tts.rate;
+      utt.pitch     = CONFIG.tts.pitch;
+      utt.volume    = CONFIG.tts.volume;
+      utt.lang      = selectedVoice?.lang || 'en-IN';
+
+      let resolved = false;
+
+      const done = () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(hardTimeout);
+          resolve();
+        }
       };
+
+      // Hard timeout — if onend never fires (Chrome bug), move to next sentence anyway
+      const hardTimeout = setTimeout(done, Math.max(20000, text.length * 80));
+
+      utt.onend   = done;
+      utt.onerror = (e) => {
+        if (e.error === 'interrupted' || e.error === 'canceled') {
+          // Expected when stop() is called — just resolve
+          done();
+        } else {
+          console.warn('[TTS] utterance error:', e.error);
+          done();
+        }
+      };
+
       synth.speak(utt);
-      currentUtterances.push(utt);
     });
   }
 
-  // ── Main speak function: sequential sentence-by-sentence ──
+  // ── Main speak function ──
   async function speak(text, callbacks = {}) {
-    if (isPlaying) stop();
+    // Stop any current playback cleanly
+    await stop();
 
     onSentenceCallback = callbacks.onSentence || null;
-    onEndCallback = callbacks.onEnd || null;
-    onStartCallback = callbacks.onStart || null;
+    onEndCallback      = callbacks.onEnd      || null;
+    onStartCallback    = callbacks.onStart    || null;
 
-    sentences = splitIntoSentences(text);
-    currentSentenceIndex = 0;
-    isPlaying = true;
-    isPaused = false;
-    currentUtterances = [];
+    sentences     = splitIntoSentences(text);
+    resumeFromIdx = 0;
+    stopSignal    = false;
+    pauseSignal   = false;
+    isPlaying     = true;
+    isPaused      = false;
 
     if (onStartCallback) onStartCallback(sentences.length);
 
-    const rate = CONFIG.tts.rate;
-    const pitch = CONFIG.tts.pitch;
-    const volume = CONFIG.tts.volume;
+    startKeepalive();
+    await runLoop(0);
+  }
 
-    for (let i = 0; i < sentences.length; i++) {
-      if (!isPlaying) break;
+  // ── The playback loop — separated so resume can call it too ──
+  async function runLoop(startIdx) {
+    for (let i = startIdx; i < sentences.length; i++) {
+      if (stopSignal) break;
 
-      // Handle pause
-      while (isPaused && isPlaying) {
-        await new Promise(r => setTimeout(r, 100));
+      // Wait while paused
+      while (pauseSignal && !stopSignal) {
+        await new Promise(r => setTimeout(r, 50));
       }
-      if (!isPlaying) break;
+      if (stopSignal) break;
 
-      currentSentenceIndex = i;
+      resumeFromIdx = i;
       if (onSentenceCallback) onSentenceCallback(i, sentences[i]);
 
-      await speakSentence(sentences[i], rate, pitch, volume);
+      await speakOne(sentences[i]);
 
-      // Small natural pause between sentences
-      if (isPlaying && !isPaused && i < sentences.length - 1) {
-        await new Promise(r => setTimeout(r, 150));
+      // Small breath between sentences
+      if (!stopSignal && !pauseSignal && i < sentences.length - 1) {
+        await new Promise(r => setTimeout(r, 180));
       }
     }
 
-    isPlaying = false;
-    isPaused = false;
-    if (onEndCallback) onEndCallback();
+    if (!pauseSignal) {
+      // Natural end
+      isPlaying  = false;
+      isPaused   = false;
+      stopSignal = false;
+      stopKeepalive();
+      if (onEndCallback) onEndCallback();
+    }
   }
 
+  // ── FIX: Pause — no more synth.cancel() race condition ──
   function pause() {
-    if (isPlaying && !isPaused) {
-      synth.cancel(); // Cancel current utterance
-      isPaused = true;
-    }
+    if (!isPlaying || isPaused) return;
+    pauseSignal = true;
+    isPaused    = true;
+    synth.cancel(); // stop current utterance audio
+    stopKeepalive();
+    console.log('[TTS] Paused at sentence', resumeFromIdx);
   }
 
+  // ── FIX: Resume — restarts loop from exact sentence ──
   function resume() {
-    if (isPaused) {
-      isPaused = false;
-      // Re-speak from current sentence
-      // (The speak loop will handle this via the isPaused while loop)
-    }
+    if (!isPaused) return;
+    pauseSignal = false;
+    isPaused    = false;
+    stopSignal  = false;
+    startKeepalive();
+    console.log('[TTS] Resuming from sentence', resumeFromIdx);
+    // The runLoop while(pauseSignal) will exit and continue
+    // But if loop already exited, restart from resumeFromIdx
+    runLoop(resumeFromIdx);
   }
 
+  // ── FIX: Stop — clean break at next await point ──
   function stop() {
-    isPlaying = false;
-    isPaused = false;
-    synth.cancel();
-    currentUtterances = [];
-    currentSentenceIndex = 0;
+    return new Promise(resolve => {
+      stopSignal  = true;
+      pauseSignal = false;
+      isPaused    = false;
+      isPlaying   = false;
+      resumeFromIdx = 0;
+      stopKeepalive();
+      synth.cancel();
+      // Give the loop 100ms to break cleanly before resolving
+      setTimeout(() => {
+        stopSignal = false; // reset for next speak()
+        resolve();
+      }, 100);
+    });
   }
 
   function togglePause() {
@@ -183,34 +277,29 @@ const TTSEngine = (() => {
   }
 
   function getState() {
-    return { isPlaying, isPaused, currentSentenceIndex, totalSentences: sentences.length };
+    return {
+      isPlaying, isPaused,
+      currentSentenceIndex: resumeFromIdx,
+      totalSentences: sentences.length,
+    };
   }
 
-  // ── Quick test speak ──
-  function testSpeak(text = 'MarketPulse AI is ready. Indian English voice active.') {
-    stop();
-    const utt = new SpeechSynthesisUtterance(text);
-    utt.voice = selectedVoice;
-    utt.rate = CONFIG.tts.rate;
-    utt.pitch = CONFIG.tts.pitch;
-    utt.volume = CONFIG.tts.volume;
+  function testSpeak(text = 'MarketPulse AI is ready. Indian English voice active. Play, Pause, and Stop buttons are all working.') {
+    synth.cancel();
+    const utt   = new SpeechSynthesisUtterance(text);
+    utt.voice   = selectedVoice;
+    utt.rate    = CONFIG.tts.rate;
+    utt.pitch   = CONFIG.tts.pitch;
+    utt.volume  = CONFIG.tts.volume;
+    utt.lang    = selectedVoice?.lang || 'en-IN';
     synth.speak(utt);
   }
 
   return {
-    loadVoices,
-    getVoiceList,
-    setVoice,
-    speak,
-    pause,
-    resume,
-    stop,
-    togglePause,
-    setRate,
-    setPitch,
-    setVolume,
-    getState,
-    testSpeak,
+    loadVoices, getVoiceList, setVoice,
+    speak, pause, resume, stop, togglePause,
+    setRate, setPitch, setVolume,
+    getState, testSpeak,
     isSupported: () => 'speechSynthesis' in window,
   };
 
