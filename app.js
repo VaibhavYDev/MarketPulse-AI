@@ -126,14 +126,17 @@ const App = (() => {
 
     const pcrStr = data.pcr !== 'N/A' ? `PCR ${data.pcr}` : '';
 
-    // Market state badge
-    const isClosed   = data.marketState === 'CLOSED' || data.marketState === 'POST';
-    const isPreMarket = data.marketState === 'PRE';
-    const stateBadge = isClosed && data.hasData
-      ? `<span class="last-close-tag">Last Close</span>`
-      : isPreMarket
-        ? `<span class="pre-market-tag">Pre-Mkt</span>`
-        : '';
+    // Market state badge — FIX: use IST-based state, not Yahoo's value
+    const isLiveMarket = data.marketState === 'REGULAR';
+    const isClosed     = data.marketState === 'CLOSED' || data.marketState === 'POST';
+    const isPreMarket  = data.marketState === 'PRE';
+    const stateBadge = isLiveMarket && data.hasData
+      ? `<span class="live-tag">Live</span>`
+      : isClosed && data.hasData
+        ? `<span class="last-close-tag">Last Close</span>`
+        : isPreMarket
+          ? `<span class="pre-market-tag">Pre-Mkt</span>`
+          : '';
 
     card.innerHTML = `
       <div class="card-header">
@@ -576,13 +579,18 @@ const App = (() => {
       toast('Price fetch failed. Will retry.', 'warning', 4000);
     }
 
-    // Auto-refresh prices every 5 minutes
-    setInterval(async () => {
-      try {
-        const data = await DataEngine.fetchAllMarketData();
-        renderAssetCards(data.assets);
-      } catch { /* silent */ }
-    }, 5 * 60 * 1000);
+    // Auto-refresh prices — 60s during market hours, 5min otherwise
+    function scheduleRefresh() {
+      const interval = DataEngine.isMarketOpen() ? 60 * 1000 : 5 * 60 * 1000;
+      setTimeout(async () => {
+        try {
+          const data = await DataEngine.fetchAllMarketData();
+          renderAssetCards(data.assets);
+        } catch { /* silent */ }
+        scheduleRefresh(); // reschedule dynamically
+      }, interval);
+    }
+    scheduleRefresh();
 
     // Manual refresh button (⟳) wired if present
     $('btn-refresh')?.addEventListener('click', async () => {
