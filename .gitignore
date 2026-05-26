@@ -1,0 +1,28 @@
+# MarketPulse AI — Security Rules
+
+# ── NEVER commit API keys ──
+# If you fork this repo, NEVER put your API key in config.js
+# Use the app's Settings panel instead. Keys stay in localStorage only.
+
+# Local config overrides (if you create one)
+config.local.js
+*.local.js
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node (if you ever add a build step)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Logs
+*.log

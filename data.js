@@ -1,0 +1,370 @@
+// ============================================================
+// MarketPulse AI — data.js  (v2 — CORS-safe, multi-source)
+// Works from GitHub Pages / any browser. Uses CORS proxies.
+// Shows last known data when market is closed.
+// ============================================================
+
+const DataEngine = (() => {
+
+  // ── CORS-safe proxy endpoints (tried in order) ──
+  const PROXIES = [
+    url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    url => `https://thingproxy.freeboard.io/fetch/${url}`,
+  ];
+
+  // Yahoo Finance chart base
+  const YF_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+  // Yahoo Finance quote summary (more reliable for current price)
+  const YF_QUOTE = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=';
+
+  // ── Persistent cache keys ──
+  const CACHE_KEY    = 'mp_price_cache';
+  const CACHE_TS_KEY = 'mp_price_cache_ts';
+  const STALE_MS     = 5 * 60 * 1000;   // 5 min refresh during market hours
+  const MAX_AGE_MS   = 24 * 60 * 60 * 1000; // keep last data for 24h max
+
+  // ── In-memory cache ──
+  const mem = { prices: {}, oi: {}, lastFetch: 0 };
+
+  // ── Utility: fetch with timeout + JSON parse ──
+  async function fetchJSON(url, opts = {}, ms = 9000) {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), ms);
+    try {
+      const res = await fetch(url, { ...opts, signal: ctrl.signal });
+      clearTimeout(tid);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      return JSON.parse(text);
+    } catch (e) {
+      clearTimeout(tid);
+      throw e;
+    }
+  }
+
+  // ── Try a URL through each proxy in sequence ──
+  async function fetchViaProxy(originalUrl, opts = {}) {
+    // Try direct first (works locally / if CORS allowed)
+    try {
+      return await fetchJSON(originalUrl, opts, 5000);
+    } catch { /* CORS likely — try proxies */ }
+
+    for (const proxy of PROXIES) {
+      try {
+        const proxied = proxy(originalUrl);
+        console.log('[DataEngine] Trying proxy:', proxied.slice(0, 60));
+        return await fetchJSON(proxied, {}, 9000);
+      } catch (e) {
+        console.warn('[DataEngine] Proxy failed:', e.message);
+      }
+    }
+    throw new Error('All proxies exhausted for: ' + originalUrl);
+  }
+
+  // ── Parse Yahoo Finance v8 chart response ──
+  function parseYFChart(data, symbol) {
+    const meta = data?.chart?.result?.[0]?.meta;
+    if (!meta) throw new Error('No chart meta');
+    const price     = meta.regularMarketPrice ?? meta.previousClose ?? null;
+    const prevClose = meta.chartPreviousClose ?? meta.previousClose ?? price;
+    const change    = price != null && prevClose != null ? price - prevClose : null;
+    const changePct = change != null && prevClose ? (change / prevClose) * 100 : null;
+    return {
+      symbol,
+      price,
+      prevClose,
+      change,
+      changePct,
+      high:        meta.regularMarketDayHigh  ?? null,
+      low:         meta.regularMarketDayLow   ?? null,
+      open:        meta.regularMarketOpen     ?? null,
+      volume:      meta.regularMarketVolume   ?? null,
+      currency:    meta.currency              ?? 'USD',
+      marketState: meta.marketState           ?? 'CLOSED',
+      exchangeName: meta.exchangeName         ?? '',
+    };
+  }
+
+  // ── Parse Yahoo Finance v7 quote response ──
+  function parseYFQuote(data, symbol) {
+    const q = data?.quoteResponse?.result?.[0];
+    if (!q) throw new Error('No quote result');
+    const price     = q.regularMarketPrice ?? q.postMarketPrice ?? null;
+    const prevClose = q.regularMarketPreviousClose ?? null;
+    const change    = q.regularMarketChange ?? null;
+    const changePct = q.regularMarketChangePercent ?? null;
+    return {
+      symbol,
+      price,
+      prevClose,
+      change,
+      changePct,
+      high:        q.regularMarketDayHigh   ?? null,
+      low:         q.regularMarketDayLow    ?? null,
+      open:        q.regularMarketOpen      ?? null,
+      volume:      q.regularMarketVolume    ?? null,
+      currency:    q.currency               ?? 'USD',
+      marketState: q.marketState            ?? 'CLOSED',
+      exchangeName: q.fullExchangeName      ?? '',
+    };
+  }
+
+  // ── Fetch a single symbol — tries v7 quote then v8 chart ──
+  async function fetchSymbol(symbol) {
+    // Method 1: v7 quote API (faster, cleaner)
+    try {
+      const url  = `${YF_QUOTE}${encodeURIComponent(symbol)}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketVolume,regularMarketPreviousClose,regularMarketOpen,currency,marketState,fullExchangeName`;
+      const data = await fetchViaProxy(url);
+      return parseYFQuote(data, symbol);
+    } catch (e) {
+      console.warn(`[DataEngine] v7 failed for ${symbol}:`, e.message);
+    }
+
+    // Method 2: v8 chart API
+    try {
+      const url  = `${YF_BASE}${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+      const data = await fetchViaProxy(url);
+      return parseYFChart(data, symbol);
+    } catch (e) {
+      console.warn(`[DataEngine] v8 failed for ${symbol}:`, e.message);
+    }
+
+    return null; // both failed — caller will use cached data
+  }
+
+  // ── Fetch USD/INR ──
+  async function fetchUSDINR() {
+    try {
+      const result = await fetchSymbol('USDINR=X');
+      return result?.price ?? 84.5;
+    } catch {
+      return 84.5;
+    }
+  }
+
+  // ── MCX conversion ──
+  function toMCX(usdPrice, assetId, usdInr) {
+    if (!usdPrice || !usdInr) return null;
+    if (assetId === 'gold')   return ((usdPrice * usdInr) / 31.1035 * 10);   // INR / 10g
+    if (assetId === 'silver') return ((usdPrice * usdInr) / 31.1035 * 1000); // INR / kg
+    if (assetId === 'crude')  return (usdPrice * usdInr);                    // INR / barrel
+    return usdPrice * usdInr;
+  }
+
+  // ── Sentiment derivation ──
+  function deriveSentiment(changePct, pcr) {
+    const pcrNum = parseFloat(pcr);
+    if (changePct == null) return 'Neutral';
+    const p = changePct > 0.6 ? 1 : changePct < -0.6 ? -1 : 0;
+    const o = isNaN(pcrNum) ? 0 : pcrNum > 1.1 ? 1 : pcrNum < 0.8 ? -1 : 0;
+    const score = p + o;
+    if (score >=  2) return 'Bullish';
+    if (score <= -2) return 'Bearish';
+    if (score ===  1) return 'Cautiously Bullish';
+    if (score === -1) return 'Cautiously Bearish';
+    return 'Neutral';
+  }
+
+  // ── Persist prices to localStorage so they survive refresh ──
+  function persistCache() {
+    try {
+      localStorage.setItem(CACHE_KEY,    JSON.stringify(mem.prices));
+      localStorage.setItem(CACHE_TS_KEY, Date.now().toString());
+    } catch { /* storage quota */ }
+  }
+
+  // ── Load persisted prices on startup ──
+  function loadPersistedCache() {
+    try {
+      const ts = parseInt(localStorage.getItem(CACHE_TS_KEY) || '0');
+      if (Date.now() - ts > MAX_AGE_MS) return; // too old, discard
+      const saved = localStorage.getItem(CACHE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        Object.assign(mem.prices, parsed);
+        console.log('[DataEngine] Loaded', Object.keys(parsed).length, 'cached prices from localStorage');
+      }
+    } catch { /* corrupt cache */ }
+  }
+
+  // ── NSE OI/PCR via CORS proxy ──
+  async function fetchNSEOptionData(nseSymbol) {
+    const url = `https://www.nseindia.com/api/option-chain-indices?symbol=${nseSymbol}`;
+    try {
+      const data = await fetchViaProxy(url);
+      if (!data?.filtered) return null;
+
+      const totalCE = data.filtered.CE?.totOI || 0;
+      const totalPE = data.filtered.PE?.totOI || 0;
+      const pcr     = totalCE > 0 ? (totalPE / totalCE).toFixed(2) : 'N/A';
+
+      let maxCallOI = 0, maxCallStrike = 0, maxPutOI = 0, maxPutStrike = 0;
+      (data.records?.data || []).forEach(rec => {
+        if (rec.CE?.openInterest > maxCallOI) { maxCallOI = rec.CE.openInterest; maxCallStrike = rec.strikePrice; }
+        if (rec.PE?.openInterest > maxPutOI)  { maxPutOI  = rec.PE.openInterest; maxPutStrike  = rec.strikePrice; }
+      });
+
+      return { pcr, maxCallStrike, maxPutStrike, totalCE, totalPE, source: 'NSE' };
+    } catch (e) {
+      console.warn(`[DataEngine] NSE OI failed for ${nseSymbol}:`, e.message);
+      return null;
+    }
+  }
+
+  // ── Detect if market is currently open (IST) ──
+  function isMarketOpen() {
+    const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const day = ist.getDay();
+    if (day === 0 || day === 6) return false;
+    const hhmm = ist.getHours() * 100 + ist.getMinutes();
+    return hhmm >= 915 && hhmm <= 1530;
+  }
+
+  // ── Master fetch ──
+  async function fetchAllMarketData() {
+    const now = Date.now();
+
+    // Load persisted data on first call
+    if (Object.keys(mem.prices).length === 0) loadPersistedCache();
+
+    // Use cache if fresh enough
+    if (now - mem.lastFetch < STALE_MS && Object.keys(mem.prices).length > 0) {
+      console.log('[DataEngine] Cache still fresh — returning stored data');
+      return buildDataObject();
+    }
+
+    console.log('[DataEngine] Fetching fresh data...');
+    window.dispatchEvent(new CustomEvent('mp:fetchStart'));
+
+    // ── Step 1: USD/INR ──
+    const usdInr = await fetchUSDINR();
+    console.log('[DataEngine] USD/INR:', usdInr);
+
+    // ── Step 2: All symbols in parallel ──
+    const allAssets = [...CONFIG.assets.equities, ...CONFIG.assets.commodities];
+
+    const results = await Promise.allSettled(
+      allAssets.map(asset =>
+        fetchSymbol(asset.symbol).then(q => ({ asset, quote: q }))
+      )
+    );
+
+    let successCount = 0;
+    results.forEach(result => {
+      if (result.status !== 'fulfilled') return;
+      const { asset, quote } = result.value;
+      if (!quote) return; // failed — keep previous cached value
+
+      let displayPrice = quote.price;
+      if (asset.type === 'commodity' && quote.price != null) {
+        displayPrice = toMCX(quote.price, asset.id, usdInr);
+      }
+
+      // Store with metadata
+      mem.prices[asset.id] = {
+        ...quote,
+        displayPrice,
+        usdInr,
+        fetchedAt: new Date().toISOString(),
+        isLive: true,
+      };
+      successCount++;
+    });
+
+    console.log(`[DataEngine] Fetched ${successCount}/${allAssets.length} assets successfully`);
+
+    // ── Step 3: OI/PCR ──
+    const oiTargets = [
+      { symbol: 'NIFTY',      id: 'nifty50' },
+      { symbol: 'BANKNIFTY',  id: 'banknifty' },
+      { symbol: 'FINNIFTY',   id: 'finnifty' },
+      { symbol: 'MIDCPNIFTY', id: 'midcapselect' },
+    ];
+    await Promise.allSettled(
+      oiTargets.map(async t => {
+        const d = await fetchNSEOptionData(t.symbol);
+        if (d) mem.oi[t.id] = d;
+      })
+    );
+
+    mem.lastFetch = now;
+    persistCache(); // save to localStorage
+
+    const dataObj = buildDataObject();
+    window.dispatchEvent(new CustomEvent('mp:dataReady', { detail: dataObj }));
+    return dataObj;
+  }
+
+  // ── Build output object from mem cache ──
+  function buildDataObject() {
+    const assets     = {};
+    const allDefs    = [...CONFIG.assets.equities, ...CONFIG.assets.commodities];
+    const marketOpen = isMarketOpen();
+
+    allDefs.forEach(def => {
+      const p   = mem.prices[def.id] || {};
+      const oi  = mem.oi[def.id]     || null;
+      const sentiment = deriveSentiment(p.changePct, oi?.pcr);
+
+      // Format price for display
+      const rawPrice = p.displayPrice ?? p.price ?? null;
+      let formattedPrice = null;
+      if (rawPrice != null) {
+        const num = Number(rawPrice);
+        if (def.type === 'commodity') {
+          // Gold/Silver = big numbers, format with commas
+          formattedPrice = num.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+        } else {
+          formattedPrice = num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+      }
+
+      assets[def.id] = {
+        id:           def.id,
+        name:         def.name,
+        shortSymbol:  def.shortSymbol,
+        color:        def.color,
+        type:         def.type,
+        rawPrice,
+        formattedPrice,
+        prevClose:    p.prevClose    ?? null,
+        change:       p.change       ?? null,
+        changePct:    p.changePct    ?? null,
+        high:         p.high         ?? null,
+        low:          p.low          ?? null,
+        open:         p.open         ?? null,
+        marketState:  p.marketState  ?? (marketOpen ? 'REGULAR' : 'CLOSED'),
+        isLive:       p.isLive       ?? false,
+        fetchedAt:    p.fetchedAt    ?? null,
+        pcr:          oi?.pcr        ?? 'N/A',
+        maxCallStrike: oi?.maxCallStrike ?? 'N/A',
+        maxPutStrike:  oi?.maxPutStrike  ?? 'N/A',
+        oiSource:      oi?.source        ?? '—',
+        sentiment,
+        hasData: rawPrice != null,
+      };
+    });
+
+    return {
+      assets,
+      fetchTime:   new Date().toISOString(),
+      usdInr:      mem.prices['gold']?.usdInr ?? 84.5,
+      isMarketOpen: marketOpen,
+    };
+  }
+
+  // ── Force-refresh (bypasses stale check) ──
+  async function forceRefresh() {
+    mem.lastFetch = 0;
+    return fetchAllMarketData();
+  }
+
+  // Load persisted data immediately on script load
+  loadPersistedCache();
+
+  return { fetchAllMarketData, forceRefresh, buildDataObject, isMarketOpen };
+
+})();
+
+window.DataEngine = DataEngine;

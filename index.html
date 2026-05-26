@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MarketPulse AI — Indian Markets Audio Briefing Bot</title>
+  <meta name="description" content="AI-powered audio market briefings for Nifty 50, BankNifty, Sensex, Midcap Select, FinNifty, Gold, Silver, and Crude Oil. Delivered 3 times daily on every NSE trading day." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- Animated Background -->
+<div class="bg-canvas"></div>
+<div class="grid-overlay"></div>
+
+<div id="app">
+
+  <!-- ══ HEADER ══ -->
+  <header class="header">
+    <div class="container">
+      <div class="header-inner">
+
+        <!-- Logo -->
+        <div class="logo">
+          <div class="logo-icon">🎙</div>
+          <div>
+            <div class="logo-text">Market<span>Pulse</span> AI</div>
+            <div class="logo-badge">Indian Markets Intelligence</div>
+          </div>
+        </div>
+
+        <!-- Clock -->
+        <div class="header-center">
+          <div class="ist-clock">
+            <div id="ist-clock">--:--:--</div>
+            <div class="date" id="ist-date">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Right Controls -->
+        <div class="header-right">
+          <div class="market-status-badge" id="market-status-badge"
+               style="border-color:#64748b50; color:#64748b; background:#64748b15;">
+            <div class="status-dot" id="status-dot" style="background:#64748b"></div>
+            <span id="status-label">Checking...</span>
+          </div>
+          <button class="btn-icon" id="btn-refresh" title="Refresh Prices" aria-label="Refresh Prices">⟳</button>
+          <button class="btn-icon" id="btn-settings" title="Settings" aria-label="Open Settings">⚙️</button>
+        </div>
+
+      </div>
+    </div>
+  </header>
+
+  <!-- ══ SCHEDULER BAR ══ -->
+  <div class="scheduler-bar">
+    <div class="container">
+      <div class="scheduler-inner">
+        <div class="next-briefing">
+          <span class="nb-label">Next Auto-Briefing:</span>
+          <span class="nb-time" id="nb-time">Calculating...</span>
+          <span class="nb-countdown" id="nb-countdown">—</span>
+        </div>
+        <div class="briefing-times">
+          <span style="margin-right:4px">Daily at:</span>
+          <div class="briefing-time-pill" id="pill-845">8:45 AM</div>
+          <div class="briefing-time-pill" id="pill-1200">12:00 PM</div>
+          <div class="briefing-time-pill" id="pill-1535">3:35 PM</div>
+          <span style="margin-left:4px; color:var(--text-muted)">IST • NSE trading days only</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ MAIN CONTENT ══ -->
+  <main class="main">
+    <div class="container">
+
+      <!-- ── Equities Grid ── -->
+      <div class="assets-equities">
+        <div class="section-label">Equity Indices</div>
+        <div class="asset-grid-5" id="equity-cards">
+          <!-- Asset cards rendered by JS -->
+          <div class="asset-card" style="opacity:0.4"><div class="card-price">—</div><div class="card-name">NIFTY 50</div></div>
+          <div class="asset-card" style="opacity:0.4"><div class="card-price">—</div><div class="card-name">BANKNIFTY</div></div>
+          <div class="asset-card" style="opacity:0.4"><div class="card-price">—</div><div class="card-name">SENSEX</div></div>
+          <div class="asset-card" style="opacity:0.4"><div class="card-price">—</div><div class="card-name">MIDCAP</div></div>
+          <div class="asset-card" style="opacity:0.4"><div class="card-price">—</div><div class="card-name">FINNIFTY</div></div>
+        </div>
+      </div>
+
+      <!-- ── Commodities Grid ── -->
+      <div class="assets-commodities">
+        <div class="section-label">MCX Commodities</div>
+        <div class="asset-grid-3" id="commodity-cards">
+          <div class="asset-card" style="opacity:0.4"><div class="card-price">—</div><div class="card-name">GOLD</div></div>
+          <div class="asset-card" style="opacity:0.4"><div class="card-price">—</div><div class="card-name">SILVER</div></div>
+          <div class="asset-card" style="opacity:0.4"><div class="card-price">—</div><div class="card-name">CRUDE</div></div>
+        </div>
+      </div>
+
+      <!-- ── Briefing Panel ── -->
+      <div class="briefing-panel">
+
+        <!-- Header -->
+        <div class="briefing-header">
+          <div class="briefing-title-area">
+            <div class="mic-icon">🎙</div>
+            <div>
+              <div class="briefing-title">AI Market Briefing</div>
+              <div class="briefing-subtitle">
+                All 8 assets · All timeframes · 1:3 Risk-Reward · Indian English
+              </div>
+            </div>
+          </div>
+
+          <!-- Audio Controls -->
+          <div class="audio-controls">
+
+            <button class="ctrl-btn ctrl-btn-generate" id="btn-generate" aria-label="Generate Briefing">
+              ✨ Generate Briefing
+            </button>
+
+            <button class="ctrl-btn ctrl-btn-play" id="btn-play" disabled aria-label="Play Briefing">
+              ▶ Play
+            </button>
+
+            <button class="ctrl-btn ctrl-btn-pause" id="btn-pause" disabled aria-label="Pause">
+              ⏸ Pause
+            </button>
+
+            <button class="ctrl-btn ctrl-btn-stop" id="btn-stop" disabled aria-label="Stop">
+              ⏹ Stop
+            </button>
+
+            <select class="ctrl-select" id="voice-select" aria-label="Select Voice">
+              <option>Loading voices...</option>
+            </select>
+
+            <select class="ctrl-select" id="speed-select" aria-label="Playback Speed"
+                    onchange="TTSEngine.setRate(this.value)">
+              <option value="0.75">0.75x</option>
+              <option value="0.9">0.9x</option>
+              <option value="1.0" selected>1.0x</option>
+              <option value="1.1">1.1x</option>
+              <option value="1.25">1.25x</option>
+              <option value="1.5">1.5x</option>
+            </select>
+
+          </div>
+        </div>
+
+        <!-- Progress bar -->
+        <div class="audio-progress" id="audio-progress" style="display:none;">
+          <div class="progress-track">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+          <div class="progress-meta">
+            <span>Sentence <span id="progress-current">0</span> of <span id="progress-total">0</span></span>
+            <span>Risk:Reward 1:3 · All Timeframes Active</span>
+          </div>
+        </div>
+
+        <!-- Briefing Text Body -->
+        <div class="briefing-body" id="briefing-body">
+          <!-- Populated by JS -->
+        </div>
+
+      </div>
+
+    </div>
+  </main>
+
+</div><!-- /#app -->
+
+<!-- ══ SETTINGS MODAL ══ -->
+<div class="modal-overlay hidden" id="settings-modal" role="dialog" aria-label="Settings">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">⚙️ Settings</div>
+      <button class="modal-close" id="btn-close-settings" aria-label="Close">✕</button>
+    </div>
+
+    <!-- Gemini API Key -->
+    <div class="form-group">
+      <label class="form-label" for="input-gemini-key">Gemini API Key</label>
+      <input class="form-input" type="password" id="input-gemini-key"
+             placeholder="AIza..." autocomplete="off" />
+      <div class="form-hint">
+        Get a free key at <a href="https://aistudio.google.com" target="_blank">aistudio.google.com</a>.
+        Stored only in your browser's localStorage.
+      </div>
+    </div>
+
+    <!-- Angel One SmartAPI -->
+    <div class="form-group">
+      <label class="form-label" for="input-angel-key">Angel One API Key (Optional)</label>
+      <input class="form-input" type="password" id="input-angel-key"
+             placeholder="Your Angel One SmartAPI key" autocomplete="off" />
+      <div class="form-hint">Used for live OI/PCR data from Angel One SmartAPI. Optional — falls back to NSE public data.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label" for="input-angel-client">Angel One Client Code (Optional)</label>
+      <input class="form-input" type="text" id="input-angel-client"
+             placeholder="Your client code" autocomplete="off" />
+    </div>
+
+    <!-- Speed -->
+    <div class="form-group">
+      <label class="form-label">Speech Speed</label>
+      <div class="slider-row">
+        <input class="slider" type="range" id="speed-slider" min="0.5" max="1.8" step="0.05" value="0.95" />
+        <div class="slider-val" id="speed-val">0.95x</div>
+      </div>
+    </div>
+
+    <!-- Test Voice -->
+    <div class="form-group">
+      <label class="form-label">Test Voice</label>
+      <button class="btn-secondary" id="btn-test-voice" style="width:100%">
+        🔊 Play Test Audio
+      </button>
+      <div class="form-hint">Plays a short test in the selected voice.</div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-secondary" id="btn-cancel-settings">Cancel</button>
+      <button class="btn-primary" id="btn-save-settings">Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ TOAST CONTAINER ══ -->
+<div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+<!-- ══ SCRIPTS ══ -->
+<script src="config.js"></script>
+<script src="scheduler.js"></script>
+<script src="data.js"></script>
+<script src="ai.js"></script>
+<script src="tts.js"></script>
+<script src="app.js"></script>
+
+</body>
+</html>
