@@ -334,23 +334,21 @@ body {
   vertical-align: middle;
   margin-left: 4px;
 }
-
-/* LIVE tag — shown during NSE market hours 9:15 AM - 3:30 PM IST */
+/* LIVE badge — shown during 9:15 AM – 3:30 PM IST */
 .live-tag {
   font-size: 8px; font-weight: 700; letter-spacing: 1.5px;
   text-transform: uppercase;
   color: #10b981;
-  border: 1px solid rgba(16,185,129,0.4);
+  border: 1px solid rgba(16,185,129,0.45);
   border-radius: 4px;
   padding: 1px 5px;
   vertical-align: middle;
   margin-left: 4px;
   animation: livePulse 2s ease-in-out infinite;
 }
-
 @keyframes livePulse {
   0%, 100% { opacity: 1; }
-  50%       { opacity: 0.55; }
+  50%       { opacity: 0.5; }
 }
 
 .card-footer {
